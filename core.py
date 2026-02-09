@@ -64,7 +64,6 @@ def app_bootstrap(page_title: str):
 
 def render_header(subtitle: str):
     col1, col2 = st.columns([1, 4])
-
     logo_path = os.path.join(os.path.dirname(__file__), "logo.png")
 
     with col1:
@@ -228,10 +227,6 @@ def auth_login(username: str, password: str) -> Optional[Dict[str, str]]:
 
 
 def require_roles(roles: List[str], label: str) -> bool:
-    """
-    Corrigido: nunca quebra quando login falha.
-    Admin sempre passa.
-    """
     user = st.session_state.get("user")
 
     if user and isinstance(user, dict):
@@ -316,10 +311,13 @@ def read_chapters(session_id: str) -> pd.DataFrame:
     df = ws_read_df("chapters")
     if df.empty:
         return df
+    if "session_id" not in df.columns:
+        return pd.DataFrame()
     df = df[df["session_id"] == session_id].copy()
     if df.empty:
         return df
-    df["chapter_index"] = df["chapter_index"].astype(int)
+    if "chapter_index" in df.columns:
+        df["chapter_index"] = pd.to_numeric(df["chapter_index"], errors="coerce").fillna(0).astype(int)
     return df.sort_values("chapter_index")
 
 
@@ -329,10 +327,10 @@ def save_chapters(session_id: str, df: pd.DataFrame):
         rows.append(
             [
                 session_id,
-                int(r.get("chapter_index", 0)),
+                int(pd.to_numeric(r.get("chapter_index", 0), errors="coerce") or 0),
                 r.get("moment_key", "aquecimento"),
                 r.get("chapter_type", "music"),
-                int(float(r.get("planned_duration_sec", 300) or 300)),
+                int(pd.to_numeric(r.get("planned_duration_sec", 300), errors="coerce") or 300),
                 r.get("music_title", ""),
                 r.get("music_artist", ""),
                 r.get("link_context_input", ""),
@@ -556,6 +554,30 @@ def page_public():
     st.rerun()
 
 
+def _safe_setlist_df(ch: pd.DataFrame) -> pd.DataFrame:
+    if ch is None or ch.empty:
+        return pd.DataFrame()
+
+    # Garante colunas mínimas
+    if "planned_duration_sec" not in ch.columns:
+        ch = ch.copy()
+        ch["planned_duration_sec"] = 0
+
+    cols = []
+    for c in ["chapter_index", "moment_key", "chapter_type", "planned_duration_sec", "music_title", "music_artist"]:
+        if c in ch.columns:
+            cols.append(c)
+
+    show = ch[cols].copy()
+
+    if "planned_duration_sec" in show.columns:
+        show["planned_duration_sec"] = pd.to_numeric(show["planned_duration_sec"], errors="coerce").fillna(0).astype(int)
+        show["planned_duration_sec"] = show["planned_duration_sec"].apply(fmt_mmss)
+        show = show.rename(columns={"planned_duration_sec": "duração"})
+
+    return show
+
+
 def page_band():
     app_bootstrap(APP_TITLE + " | Banda")
     render_header("Banda (somente leitura)")
@@ -574,11 +596,7 @@ def page_band():
         st.warning("Sem capítulos.")
         return
 
-    show = ch[
-        ["chapter_index", "moment_key", "chapter_type", "planned_duration_sec", "music_title", "music_artist"]
-    ].copy()
-    show["planned_duration_sec"] = show["planned_duration_sec"].astype(int).apply(fmt_mmss)
-    show = show.rename(columns={"planned_duration_sec": "duração"})
+    show = _safe_setlist_df(ch)
     st.dataframe(show, use_container_width=True, hide_index=True)
 
     st.subheader("Link do Cliente")
@@ -599,9 +617,9 @@ def page_admin():
         genre = st.text_input("Gênero", value="Jazz")
         total = st.number_input("Duração total (min)", min_value=45, max_value=240, value=120, step=5)
         ok = st.form_submit_button("Criar")
+
     if ok:
         upsert_session(sid, title, genre, int(total), "draft")
-
         base = []
         for i in range(5):
             base.append(
@@ -628,7 +646,7 @@ def page_admin():
         st.info("Sem sessões.")
         return
 
-    st.subheader("Editar capítulos (versão atual)")
+    st.subheader("Sessão")
     sid2 = st.selectbox("Sessão", sess_df["session_id"].tolist(), key="sid2")
     sess = get_session_row(sid2) or {}
     genre = sess.get("genre", "Jazz")
@@ -638,15 +656,12 @@ def page_admin():
         st.warning("Sem capítulos.")
         return
 
-    edit_cols = [
-        "chapter_index",
-        "moment_key",
-        "chapter_type",
-        "planned_duration_sec",
-        "music_title",
-        "music_artist",
-        "link_context_input",
-    ]
+    st.subheader("Resumo dos capítulos (não quebra)")
+    show = _safe_setlist_df(ch)
+    st.dataframe(show, use_container_width=True, hide_index=True)
+
+    st.subheader("Editar capítulos")
+    edit_cols = [c for c in ["chapter_index", "moment_key", "chapter_type", "planned_duration_sec", "music_title", "music_artist", "link_context_input"] if c in ch.columns]
     edited = st.data_editor(ch[edit_cols], use_container_width=True, hide_index=True)
 
     c1, c2, c3 = st.columns([1, 1, 1])
@@ -664,28 +679,36 @@ def page_admin():
             full = ch.copy().reset_index(drop=True)
             n = 0
 
+            if "chapter_type" not in full.columns:
+                st.error("Coluna chapter_type não existe na aba chapters.")
+                return
+
             for i in range(len(full)):
                 if str(full.loc[i, "chapter_type"]).strip().lower() != "music":
                     continue
 
                 payload = {
                     "genre": genre,
-                    "moment_key": str(full.loc[i, "moment_key"]),
-                    "music_title": str(full.loc[i, "music_title"]),
-                    "music_artist": str(full.loc[i, "music_artist"]),
-                    "link_context_input": str(full.loc[i, "link_context_input"]),
+                    "moment_key": str(full.loc[i, "moment_key"]) if "moment_key" in full.columns else "",
+                    "music_title": str(full.loc[i, "music_title"]) if "music_title" in full.columns else "",
+                    "music_artist": str(full.loc[i, "music_artist"]) if "music_artist" in full.columns else "",
+                    "link_context_input": str(full.loc[i, "link_context_input"]) if "link_context_input" in full.columns else "",
                 }
                 out = gemini_generate(payload)
 
-                full.loc[i, "ai_story_text"] = out["story_text"]
-                full.loc[i, "ai_music_alternatives"] = out["music_alternatives"]
-                full.loc[i, "ai_experience_actions"] = out["experience_actions"]
-                full.loc[i, "ai_notes"] = out["notes"]
+                for col, key in [
+                    ("ai_story_text", "story_text"),
+                    ("ai_music_alternatives", "music_alternatives"),
+                    ("ai_experience_actions", "experience_actions"),
+                    ("ai_notes", "notes"),
+                ]:
+                    if col in full.columns:
+                        full.loc[i, col] = out[key]
 
                 append_gemini_history(
                     {
                         "session_id": sid2,
-                        "chapter_index": int(full.loc[i, "chapter_index"]),
+                        "chapter_index": int(pd.to_numeric(full.loc[i, "chapter_index"], errors="coerce") or 0),
                         "moment_key": payload["moment_key"],
                         "music_title": payload["music_title"],
                         "music_artist": payload["music_artist"],
@@ -696,7 +719,6 @@ def page_admin():
                         "ai_notes": out["notes"],
                     }
                 )
-
                 n += 1
 
             save_chapters(sid2, full)
@@ -706,7 +728,7 @@ def page_admin():
         if st.button("Avançar capítulo (live)"):
             idx = get_live_index(sid2)
             idx = idx + 1
-            max_idx = int(ch["chapter_index"].max())
+            max_idx = int(ch["chapter_index"].max()) if "chapter_index" in ch.columns else 0
             if idx > max_idx:
                 idx = max_idx
             set_live_index(sid2, idx)
