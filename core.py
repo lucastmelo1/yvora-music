@@ -65,7 +65,6 @@ def app_bootstrap(page_title: str):
 def render_header(subtitle: str):
     col1, col2 = st.columns([1, 4])
 
-    # Logo no root do repo, junto com core.py
     logo_path = os.path.join(os.path.dirname(__file__), "logo.png")
 
     with col1:
@@ -210,7 +209,7 @@ HIST_HEADERS = [
 def auth_login(username: str, password: str) -> Optional[Dict[str, str]]:
     ws_get_or_create("users", USERS_HEADERS)
     df = ws_read_df("users")
-    if df.empty:
+    if df is None or df.empty:
         return None
 
     u = (username or "").strip()
@@ -218,32 +217,44 @@ def auth_login(username: str, password: str) -> Optional[Dict[str, str]]:
 
     for _, r in df.iterrows():
         active = str(r.get("active", "1")).strip()
-        if active in ["0", "False", "false"]:
+        if active not in ["1", "True", "true"]:
             continue
+
         if str(r.get("username", "")).strip() == u and str(r.get("password", "")).strip() == p:
             role = str(r.get("role", "staff")).strip() or "staff"
             return {"username": u, "role": role}
+
     return None
 
 
 def require_roles(roles: List[str], label: str) -> bool:
+    """
+    Corrigido: nunca quebra quando login falha.
+    Admin sempre passa.
+    """
     user = st.session_state.get("user")
-    if user:
+
+    if user and isinstance(user, dict):
         role = user.get("role", "")
-        return role == "admin" or role in roles
+        if role == "admin" or role in roles:
+            return True
 
     with st.sidebar:
         st.markdown(f"### {label}")
         u = st.text_input("Login", key=f"login_{label}")
         p = st.text_input("Senha", type="password", key=f"pwd_{label}")
+
         if st.button("Entrar", key=f"btn_{label}"):
             user = auth_login(u, p)
+
             if not user:
                 st.warning("Login ou senha incorretos.")
                 return False
+
             st.session_state["user"] = user
-            st.success(f"Logado como {user['role']}")
+            st.success(f"Logado como {user.get('role','')}")
             st.rerun()
+
     return False
 
 
@@ -592,7 +603,7 @@ def page_admin():
         upsert_session(sid, title, genre, int(total), "draft")
 
         base = []
-        for i in range(10):
+        for i in range(5):
             base.append(
                 {
                     "chapter_index": i,
@@ -650,11 +661,8 @@ def page_admin():
 
     with c2:
         if st.button("Gemini: gerar e registrar histórico"):
-            full = ch.copy()
+            full = ch.copy().reset_index(drop=True)
             n = 0
-
-            # garantir índices contínuos para loc
-            full = full.reset_index(drop=True)
 
             for i in range(len(full)):
                 if str(full.loc[i, "chapter_type"]).strip().lower() != "music":
@@ -692,7 +700,7 @@ def page_admin():
                 n += 1
 
             save_chapters(sid2, full)
-            st.success(f"IA gerou {n} capítulos, salvou em chapters e registrou tudo em gemini_history.")
+            st.success(f"IA gerou {n} capítulos, salvou em chapters e registrou em gemini_history.")
 
     with c3:
         if st.button("Avançar capítulo (live)"):
@@ -703,10 +711,3 @@ def page_admin():
                 idx = max_idx
             set_live_index(sid2, idx)
             st.success(f"Agora no capítulo {idx}")
-
-    st.subheader("Links")
-    st.write("Streamlit Cloud: crie 3 apps no mesmo repo")
-    st.write("Cliente: public.py")
-    st.write("Banda: band.py")
-    st.write("Operação: adm.py")
-    st.write("Cliente abre com ?sid=SEU_SESSION_ID")
